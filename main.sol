@@ -258,3 +258,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
     uint64 public withdrawDelaySeconds;
     uint64 public vaultWithdrawDelaySeconds;
     uint64 public minRequestSpacingSeconds;
+
+    uint256 public perTxMaxWithdrawWei;
+    uint256 public perDaySoftLimitWei;
+    bool public enforceSoftDailyLimit;
+
+    // ---------- Accounting ----------
+    // Track contract liabilities precisely so rescue can only withdraw true excess ETH.
+    uint256 public totalLiabilitiesWei;
+
+    struct Account {
+        uint256 checking;
+        uint64 lastRequestAt;
+        uint64 dayIndex;
+        uint256 dayOutflowWei;
+        uint256 nonce;
+    }
+
+    mapping(address => Account) private _acct;
+
+    // ---------- Pending staged withdrawals ----------
+    struct Pending {
+        uint256 amountWei;
+        uint256 feeWei;
+        uint64 availableAt;
+        address to;
+        bool fromVault;
+        uint256 vaultId;
+    }
+
+    mapping(address => mapping(bytes32 => Pending)) private _pending;
+
+    // ---------- Vaults (Savings jars) ----------
+    enum VaultMode {
+        Basic,        // no extra constraints
+        TimelockOnly, // must satisfy unlockAt
+        GoalGate,     // withdraw discouraged unless above goal (signal only)
+        Fortress      // higher default delay (policy-derived)
+    }
+
+    struct Vault {
+        bytes32 labelHash;
+        uint256 balanceWei;
+        uint256 goalWei;
+        uint64 unlockAt;
+        uint64 createdAt;
+        uint8 mode;     // VaultMode
+        uint32 spice;   // file-unique salt bits for UI differentiation
+    }
+
+    mapping(address => uint256) public vaultCount;
+    mapping(address => mapping(uint256 => Vault)) private _vaults;
+
+    // ---------- AI signal layer (deterministic; no oracle required) ----------
+    bytes32 public aiModelTag;
+    uint256 public aiEpoch;
+
+    // ---------- Scheduled savings (checking -> vault) ----------
+    // A simple on-chain schedule that moves funds periodically when poked.
+    struct Schedule {
+        uint256 amountWei;
+        uint64 everySeconds;
+        uint64 nextAt;
+        uint64 endAt;
+        uint32 flags;
+        uint256 vaultId;
