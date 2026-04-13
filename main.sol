@@ -128,3 +128,68 @@ library NebulaECDSA {
     error NebulaECDSA__BadS();
 
     function recover(bytes32 digest, bytes memory signature) internal pure returns (address) {
+        if (signature.length != 65) revert NebulaECDSA__BadSigLen();
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        // solhint-disable-next-line no-inline-assembly
+        assembly {
+            r := mload(add(signature, 0x20))
+            s := mload(add(signature, 0x40))
+            v := byte(0, mload(add(signature, 0x60)))
+        }
+
+        // secp256k1n/2
+        if (uint256(s) > 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0) revert NebulaECDSA__BadS();
+        if (v != 27 && v != 28) revert NebulaECDSA__BadV();
+        address signer = ecrecover(digest, v, r, s);
+        if (signer == address(0)) revert Nebula__SignatureInvalid();
+        return signer;
+    }
+}
+
+/// @notice Simple nonReentrant guard.
+abstract contract NebulaReentrancyGuard {
+    uint256 private _status;
+
+    constructor() {
+        _status = 1;
+    }
+
+    modifier nonReentrant() {
+        if (_status == 2) revert Nebula__BadState();
+        _status = 2;
+        _;
+        _status = 1;
+    }
+}
+
+/// @notice Owner + guardian two-key control.
+abstract contract NebulaOwnable {
+    address public owner;
+    address public guardian;
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert Nebula__Unauthorized();
+        _;
+    }
+
+    modifier onlyGuardianOrOwner() {
+        if (msg.sender != owner && msg.sender != guardian) revert Nebula__Unauthorized();
+        _;
+    }
+
+    constructor() {
+        owner = msg.sender;
+        guardian = msg.sender;
+        emit NebulaOwnershipTransferred(address(0), msg.sender);
+        emit NebulaGuardianUpdated(address(0), msg.sender);
+    }
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert Nebula__ZeroAddress();
+        address prev = owner;
+        owner = newOwner;
+        emit NebulaOwnershipTransferred(prev, newOwner);
+    }
+
