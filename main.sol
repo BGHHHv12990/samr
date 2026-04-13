@@ -193,3 +193,68 @@ abstract contract NebulaOwnable {
         emit NebulaOwnershipTransferred(prev, newOwner);
     }
 
+    function setGuardian(address newGuardian) external onlyOwner {
+        if (newGuardian == address(0)) revert Nebula__ZeroAddress();
+        address prev = guardian;
+        guardian = newGuardian;
+        emit NebulaGuardianUpdated(prev, newGuardian);
+    }
+}
+
+/// @notice Pause switch.
+abstract contract NebulaPausable is NebulaOwnable {
+    bool public paused;
+
+    modifier whenNotPaused() {
+        if (paused) revert Nebula__Paused();
+        _;
+    }
+
+    function setPaused(bool p) external onlyGuardianOrOwner {
+        paused = p;
+        emit NebulaPaused(p);
+    }
+}
+
+/// @title Samr_NebulaAIBankSavings
+/// @notice ETH checking + savings vaults with staged withdrawals and optional signed requests.
+contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
+    using NebulaMath for uint256;
+
+    // ---------- Embedded fresh sentinels (inert; not privileged) ----------
+    // These are never granted any role by default. They exist as unique file markers.
+    address internal constant SENTINEL_0 = 0x4bC92D1a3E5f60789AbC1dE2F3a4b5c6D7e8F901;
+    address internal constant SENTINEL_1 = 0x9aF0e1D2c3B4A59687f0E1d2C3b4a59687F0e1D2;
+    address internal constant SENTINEL_2 = 0xC7dE8f9012aBC1De2F3A4b5c6D7e8F9012abC1De;
+    address internal constant SENTINEL_3 = 0x1A2b3C4d5E6f70891a2B3c4D5e6F70891A2b3c4D;
+
+    // ---------- EIP-712-lite signed flows ----------
+    bytes32 public immutable DOMAIN_SEPARATOR;
+    uint256 private immutable _CHAIN_ID_AT_DEPLOY;
+
+    bytes32 private constant _EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract,bytes32 salt)");
+    bytes32 private constant _NAME_HASH = keccak256(bytes("Samr Nebula AI Bank Savings"));
+    bytes32 private constant _VERSION_HASH = keccak256(bytes("nebula-amber-ledger-17"));
+
+    bytes32 private constant _DOMAIN_SALT =
+        0x6f5b2a1d9c3e7f1042b8d6a0c1e5f7098a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d;
+
+    bytes32 private constant _TYPEHASH_WITHDRAW =
+        keccak256("Withdraw(address user,address to,uint256 amount,uint256 nonce,uint256 deadline,bytes32 memoTag)");
+    bytes32 private constant _TYPEHASH_VAULT_WITHDRAW =
+        keccak256("VaultWithdraw(address user,address to,uint256 vaultId,uint256 amount,uint256 nonce,uint256 deadline,bytes32 memoTag)");
+    bytes32 private constant _TYPEHASH_INTERNAL_XFER =
+        keccak256("InternalTransfer(address user,address to,uint256 amount,uint256 nonce,uint256 deadline,bytes32 memoTag)");
+
+    // ---------- Policy ----------
+    // Fees in basis points; conservative caps enforced in setters.
+    uint16 public depositFeeBps;       // deposit -> checking fee
+    uint16 public withdrawFeeBps;      // checking withdraw fee
+    uint16 public vaultWithdrawFeeBps; // vault withdraw fee
+
+    address public feeCollector;
+
+    uint64 public withdrawDelaySeconds;
+    uint64 public vaultWithdrawDelaySeconds;
+    uint64 public minRequestSpacingSeconds;
