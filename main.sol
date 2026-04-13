@@ -388,3 +388,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
         view
         returns (
             bytes32 labelHash,
+            uint256 balanceWei,
+            uint256 goalWei,
+            uint64 unlockAt,
+            uint64 createdAt,
+            uint8 mode,
+            uint32 spice
+        )
+    {
+        Vault storage v = _getVaultOrRevert(user, vaultId);
+        return (v.labelHash, v.balanceWei, v.goalWei, v.unlockAt, v.createdAt, v.mode, v.spice);
+    }
+
+    function getPending(address user, bytes32 ticket)
+        external
+        view
+        returns (uint256 amountWei, uint256 feeWei, uint64 availableAt, address to, bool fromVault, uint256 vaultId)
+    {
+        Pending storage p = _pending[user][ticket];
+        return (p.amountWei, p.feeWei, p.availableAt, p.to, p.fromVault, p.vaultId);
+    }
+
+    function getSchedule(address user, bytes32 scheduleId)
+        external
+        view
+        returns (uint256 amountWei, uint64 everySeconds, uint64 nextAt, uint64 endAt, uint32 flags, uint256 vaultId, bool live)
+    {
+        Schedule storage s = _schedules[user][scheduleId];
+        return (s.amountWei, s.everySeconds, s.nextAt, s.endAt, s.flags, s.vaultId, s.live);
+    }
+
+    function domainSeparatorNow() external view returns (bytes32) {
+        if (block.chainid == _CHAIN_ID_AT_DEPLOY) return DOMAIN_SEPARATOR;
+        return _computeDomainSeparator();
+    }
+
+    function computeTicket(
+        address user,
+        address to,
+        uint256 amountWei,
+        bool fromVault,
+        uint256 vaultId,
+        bytes32 memoTag
+    ) public view returns (bytes32) {
+        return keccak256(abi.encodePacked(address(this), block.chainid, user, to, amountWei, fromVault, vaultId, memoTag, SENTINEL_3));
+    }
+
+    function computeScheduleId(address user, uint256 vaultId, uint256 amountWei, uint64 everySeconds, uint64 startAt, uint64 endAt)
+        public
+        view
+        returns (bytes32)
+    {
+        return keccak256(abi.encodePacked(SENTINEL_1, address(this), block.chainid, user, vaultId, amountWei, everySeconds, startAt, endAt));
+    }
+
+    // ---------- Admin: fee + policy ----------
+    function setFeeCollector(address newCollector) external onlyOwner {
+        if (newCollector == address(0)) revert Nebula__ZeroAddress();
+        address prev = feeCollector;
+        feeCollector = newCollector;
+        emit NebulaFeeCollectorUpdated(prev, newCollector);
+    }
+
+    function setFeeRates(uint16 newDepositBps, uint16 newWithdrawBps, uint16 newVaultWithdrawBps) external onlyOwner {
+        if (newDepositBps > 175) revert Nebula__FeeTooHigh();      // <= 1.75%
+        if (newWithdrawBps > 175) revert Nebula__FeeTooHigh();
