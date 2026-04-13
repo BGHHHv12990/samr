@@ -323,3 +323,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
         uint64 endAt;
         uint32 flags;
         uint256 vaultId;
+        bool live;
+    }
+
+    mapping(address => mapping(bytes32 => Schedule)) private _schedules;
+
+    // ---------- Audit ring buffer (compact) ----------
+    // Stores recent activity digests; useful for off-chain monitoring.
+    uint256 public auditCursor;
+    mapping(uint256 => bytes32) public auditRing;
+    uint256 private constant _AUDIT_RING_SIZE = 257; // prime-ish
+
+    // ---------- Constructor ----------
+    constructor() {
+        _CHAIN_ID_AT_DEPLOY = block.chainid;
+        DOMAIN_SEPARATOR = _computeDomainSeparator();
+
+        feeCollector = msg.sender;
+        emit NebulaFeeCollectorUpdated(address(0), msg.sender);
+
+        depositFeeBps = 0;
+        withdrawFeeBps = 0;
+        vaultWithdrawFeeBps = 0;
+        emit NebulaFeeRatesUpdated(depositFeeBps, withdrawFeeBps, vaultWithdrawFeeBps);
+
+        withdrawDelaySeconds = 2 hours;
+        vaultWithdrawDelaySeconds = 6 hours;
+        minRequestSpacingSeconds = 7 minutes;
+        emit NebulaTimingUpdated(withdrawDelaySeconds, vaultWithdrawDelaySeconds, minRequestSpacingSeconds);
+
+        perTxMaxWithdrawWei = 275 ether;
+        perDaySoftLimitWei = 1_250 ether;
+        enforceSoftDailyLimit = false;
+        emit NebulaRiskUpdated(perTxMaxWithdrawWei, perDaySoftLimitWei, enforceSoftDailyLimit);
+
+        aiModelTag = keccak256(abi.encodePacked(address(this), SENTINEL_2, _DOMAIN_SALT, uint256(block.prevrandao)));
+        aiEpoch = uint256(uint160(SENTINEL_0)) ^ uint256(uint160(SENTINEL_3));
+
+        _audit(bytes32(uint256(uint160(address(this)))) ^ keccak256(abi.encodePacked(SENTINEL_1, block.number)));
+        emit NebulaPolicy(keccak256(abi.encodePacked("boot", _VERSION_HASH)), uint256(aiModelTag));
+    }
+
+    // ---------- Receive / fallback ----------
+    receive() external payable {
+        _depositToChecking(msg.sender, msg.value, bytes32(0));
+    }
+
+    fallback() external payable {
+        _depositToChecking(msg.sender, msg.value, keccak256(msg.data));
+    }
+
+    // ---------- Views ----------
+    function getAccount(address user)
+        external
+        view
+        returns (uint256 checking, uint64 lastRequestAt, uint64 dayIndex, uint256 dayOutflowWei, uint256 nonce)
+    {
+        Account storage a = _acct[user];
+        return (a.checking, a.lastRequestAt, a.dayIndex, a.dayOutflowWei, a.nonce);
+    }
+
+    function getVault(address user, uint256 vaultId)
+        external
+        view
+        returns (
+            bytes32 labelHash,
