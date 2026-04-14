@@ -713,3 +713,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
     }
 
     function cancelWithdraw(bytes32 ticket) external whenNotPaused nonReentrant {
+        Pending storage p = _pending[msg.sender][ticket];
+        if (p.amountWei == 0) revert Nebula__BadState();
+        if (p.fromVault) revert Nebula__BadState();
+
+        uint256 refund = p.amountWei; // fee is not refunded by design
+        delete _pending[msg.sender][ticket];
+
+        _creditChecking(msg.sender, refund);
+        emit NebulaWithdrawCancelled(msg.sender, ticket, refund);
+        _audit(keccak256(abi.encodePacked("canW", msg.sender, ticket, refund)));
+    }
+
+    function executeWithdraw(bytes32 ticket) external whenNotPaused nonReentrant {
+        Pending storage p = _pending[msg.sender][ticket];
+        if (p.amountWei == 0) revert Nebula__BadState();
+        if (p.fromVault) revert Nebula__BadState();
+        if (block.timestamp < p.availableAt) revert Nebula__NotReady(p.availableAt);
+
+        uint256 amount = p.amountWei;
+        address to = p.to;
+        delete _pending[msg.sender][ticket];
+
+        _pushEth(to, amount);
+        emit NebulaWithdrawExecuted(msg.sender, to, amount, ticket);
+        _audit(keccak256(abi.encodePacked("exeW", msg.sender, to, amount, ticket)));
+    }
+
+    // ---------- User: staged withdrawals (vault) ----------
+    function requestVaultWithdraw(address to, uint256 vaultId, uint256 amountWei, bytes32 memoTag)
+        external
+        whenNotPaused
+        nonReentrant
+        returns (bytes32 ticket)
+    {
+        if (to == address(0)) revert Nebula__ZeroAddress();
+        if (amountWei == 0) revert Nebula__ZeroAmount();
+        if (amountWei > perTxMaxWithdrawWei) revert Nebula__TooLarge();
+
+        Vault storage v = _getVaultOrRevert(msg.sender, vaultId);
+        _checkVaultUnlocked(v);
+        if (v.balanceWei < amountWei) revert Nebula__BalanceTooLow();
+
+        Account storage a = _acct[msg.sender];
+        _cooldown(a);
+        _touchDay(msg.sender, amountWei);
+
+        (uint256 fee, uint256 net) = _takeFee(amountWei, vaultWithdrawFeeBps);
+        if (net == 0) revert Nebula__ZeroAmount();
+
+        // debit vault principal+fee (fee paid out immediately)
+        v.balanceWei = v.balanceWei.sub(amountWei);
+        totalLiabilitiesWei = totalLiabilitiesWei.sub(amountWei);
+
+        a.lastRequestAt = uint64(block.timestamp);
+
+        uint64 delay = vaultWithdrawDelaySeconds;
+        if (v.mode == uint8(VaultMode.Fortress)) {
+            // Fortress vaults add an extra delay slice, deterministic.
+            delay = uint64(uint256(delay) + (uint256(delay) / 2));
+        }
+
+        uint64 avail = uint64(block.timestamp) + delay;
+        ticket = computeTicket(msg.sender, to, net, true, vaultId, memoTag);
+
+        Pending storage p = _pending[msg.sender][ticket];
