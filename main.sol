@@ -973,3 +973,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
         uint64 t = uint64(block.timestamp);
         uint256 moves;
 
+        while (moves < maxMoves && s.live && s.nextAt <= t) {
+            if (s.endAt != 0 && s.nextAt > s.endAt) {
+                s.live = false;
+                break;
+            }
+            // attempt move
+            Account storage a = _acct[msg.sender];
+            if (a.checking < s.amountWei) {
+                // insufficient; bump next and stop
+                s.nextAt = uint64(uint256(s.nextAt) + uint256(s.everySeconds));
+                break;
+            }
+
+            Vault storage v = _getVaultOrRevert(msg.sender, s.vaultId);
+            a.checking = a.checking.sub(s.amountWei);
+            totalLiabilitiesWei = totalLiabilitiesWei.sub(s.amountWei);
+            v.balanceWei = v.balanceWei.add(s.amountWei);
+            totalLiabilitiesWei = totalLiabilitiesWei.add(s.amountWei);
+
+            movedWei = movedWei.add(s.amountWei);
+            s.nextAt = uint64(uint256(s.nextAt) + uint256(s.everySeconds));
+            moves += 1;
+        }
+
+        nextAt = s.nextAt;
+        emit NebulaScheduledPoked(msg.sender, scheduleId, nextAt, movedWei);
+        if (movedWei != 0) {
+            _ai(msg.sender, int256(_score(msg.sender, movedWei, true)));
+        }
+        _audit(keccak256(abi.encodePacked("schPoke", msg.sender, scheduleId, movedWei, nextAt, maxMoves)));
+    }
+
+    // ---------- Emergency / ops ----------
+    function rescueExcessEth(address to, uint256 amountWei, bytes32 reason) external onlyOwner nonReentrant {
+        if (to == address(0)) revert Nebula__ZeroAddress();
+        if (amountWei == 0) revert Nebula__ZeroAmount();
+
+        uint256 bal = address(this).balance;
+        if (bal <= totalLiabilitiesWei) revert Nebula__BalanceTooLow();
+        uint256 excess = bal - totalLiabilitiesWei;
+        if (amountWei > excess) revert Nebula__TooLarge();
+
+        _pushEth(to, amountWei);
+        emit NebulaRescue(to, amountWei, reason);
+        _audit(keccak256(abi.encodePacked("rescue", to, amountWei, reason)));
+    }
+
+    // ---------- Helper views ----------
+    function estimateDepositFee(uint256 amountWei) external view returns (uint256 feeWei, uint256 creditedWei) {
+        feeWei = _fee(amountWei, depositFeeBps);
+        creditedWei = amountWei.sub(feeWei);
+    }
+
+    function estimateWithdrawFee(uint256 amountWei) external view returns (uint256 feeWei, uint256 netWei, uint256 totalDebitWei) {
+        feeWei = _fee(amountWei, withdrawFeeBps);
+        netWei = amountWei.sub(feeWei);
+        totalDebitWei = amountWei.add(feeWei);
+    }
+
+    function estimateVaultWithdrawFee(uint256 amountWei) external view returns (uint256 feeWei, uint256 netWei) {
+        feeWei = _fee(amountWei, vaultWithdrawFeeBps);
+        netWei = amountWei.sub(feeWei);
+    }
+
+    function accountHealth(address user) external view returns (uint256 healthBps, uint256 checkingWei, uint256 vaultsWei, uint256 vaults) {
