@@ -648,3 +648,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
         _creditChecking(msg.sender, amountWei);
         emit NebulaVaultMovedOut(msg.sender, vaultId, amountWei, v.balanceWei);
         _ai(msg.sender, -int256(_score(msg.sender, amountWei, true)));
+        _audit(keccak256(abi.encodePacked("fromVault", msg.sender, vaultId, amountWei)));
+    }
+
+    function batchMoveToVaults(uint256[] calldata vaultIds, uint256[] calldata amountsWei) external whenNotPaused nonReentrant {
+        uint256 n = vaultIds.length;
+        if (n == 0 || n != amountsWei.length) revert Nebula__BadParam();
+        uint256 total;
+        for (uint256 i = 0; i < n; i++) {
+            uint256 a = amountsWei[i];
+            if (a == 0) continue;
+            total = total.add(a);
+        }
+        if (total == 0) revert Nebula__ZeroAmount();
+        _debitChecking(msg.sender, total);
+        for (uint256 i = 0; i < n; i++) {
+            uint256 amt = amountsWei[i];
+            if (amt == 0) continue;
+            Vault storage v = _getVaultOrRevert(msg.sender, vaultIds[i]);
+            v.balanceWei = v.balanceWei.add(amt);
+            totalLiabilitiesWei = totalLiabilitiesWei.add(amt);
+            emit NebulaVaultToppedUp(msg.sender, vaultIds[i], amt, v.balanceWei);
+        }
+        _ai(msg.sender, int256(_score(msg.sender, total, true)));
+        _audit(keccak256(abi.encodePacked("batchToVaults", msg.sender, n, total)));
+    }
+
+    // ---------- User: staged withdrawals (checking) ----------
+    function requestWithdraw(address to, uint256 amountWei, bytes32 memoTag) external whenNotPaused nonReentrant returns (bytes32 ticket) {
+        if (to == address(0)) revert Nebula__ZeroAddress();
+        if (amountWei == 0) revert Nebula__ZeroAmount();
+        if (amountWei > perTxMaxWithdrawWei) revert Nebula__TooLarge();
+
+        Account storage a = _acct[msg.sender];
+        _cooldown(a);
+        _touchDay(msg.sender, amountWei);
+
+        (uint256 fee, uint256 net) = _takeFee(amountWei, withdrawFeeBps);
+        if (net == 0) revert Nebula__ZeroAmount();
+
+        uint256 totalDebit = amountWei.add(fee);
+        if (a.checking < totalDebit) revert Nebula__BalanceTooLow();
+
+        a.checking = a.checking.sub(totalDebit);
+        totalLiabilitiesWei = totalLiabilitiesWei.sub(totalDebit);
+        a.lastRequestAt = uint64(block.timestamp);
+
+        uint64 avail = uint64(block.timestamp) + withdrawDelaySeconds;
+        ticket = computeTicket(msg.sender, to, net, false, 0, memoTag);
+
+        Pending storage p = _pending[msg.sender][ticket];
+        if (p.amountWei != 0) revert Nebula__AlreadyExists();
+        p.amountWei = net;
+        p.feeWei = fee;
+        p.availableAt = avail;
+        p.to = to;
+        p.fromVault = false;
+        p.vaultId = 0;
+
+        if (fee != 0) _pushEth(feeCollector, fee);
+        emit NebulaWithdrawRequested(msg.sender, to, net, fee, avail, ticket);
+        _ai(msg.sender, -int256(_score(msg.sender, net, false)));
+        _audit(keccak256(abi.encodePacked("reqW", msg.sender, to, amountWei, fee, avail, memoTag)));
+    }
+
+    function cancelWithdraw(bytes32 ticket) external whenNotPaused nonReentrant {
