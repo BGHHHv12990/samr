@@ -843,3 +843,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
         _cooldown(a);
         _touchDay(user, amountWei);
 
+        (uint256 fee, uint256 net) = _takeFee(amountWei, withdrawFeeBps);
+        if (net == 0) revert Nebula__ZeroAmount();
+        uint256 totalDebit = amountWei.add(fee);
+        if (a.checking < totalDebit) revert Nebula__BalanceTooLow();
+
+        a.checking = a.checking.sub(totalDebit);
+        totalLiabilitiesWei = totalLiabilitiesWei.sub(totalDebit);
+        a.lastRequestAt = uint64(block.timestamp);
+
+        uint64 avail = uint64(block.timestamp) + withdrawDelaySeconds;
+        ticket = computeTicket(user, to, net, false, 0, memoTag);
+
+        Pending storage p = _pending[user][ticket];
+        if (p.amountWei != 0) revert Nebula__AlreadyExists();
+        p.amountWei = net;
+        p.feeWei = fee;
+        p.availableAt = avail;
+        p.to = to;
+        p.fromVault = false;
+        p.vaultId = 0;
+
+        if (fee != 0) _pushEth(feeCollector, fee);
+        emit NebulaWithdrawRequested(user, to, net, fee, avail, ticket);
+        _audit(keccak256(abi.encodePacked("reqWsig", user, to, amountWei, fee, avail, memoTag)));
+    }
+
+    function requestVaultWithdrawWithSig(
+        address user,
+        address to,
+        uint256 vaultId,
+        uint256 amountWei,
+        uint256 deadline,
+        bytes32 memoTag,
+        bytes calldata signature
+    ) external whenNotPaused nonReentrant returns (bytes32 ticket) {
+        if (block.timestamp > deadline) revert Nebula__SignatureExpired(deadline);
+        if (user == address(0) || to == address(0)) revert Nebula__ZeroAddress();
+        if (amountWei == 0) revert Nebula__ZeroAmount();
+        if (amountWei > perTxMaxWithdrawWei) revert Nebula__TooLarge();
+
+        Account storage a = _acct[user];
+        bytes32 digest =
+            _hashTypedData(keccak256(abi.encode(_TYPEHASH_VAULT_WITHDRAW, user, to, vaultId, amountWei, a.nonce, deadline, memoTag)));
+        _validateSig(user, digest, signature);
+        unchecked {
+            a.nonce += 1;
+        }
+
+        Vault storage v = _getVaultOrRevert(user, vaultId);
+        _checkVaultUnlocked(v);
+        if (v.balanceWei < amountWei) revert Nebula__BalanceTooLow();
+
+        _cooldown(a);
+        _touchDay(user, amountWei);
+
+        (uint256 fee, uint256 net) = _takeFee(amountWei, vaultWithdrawFeeBps);
+        if (net == 0) revert Nebula__ZeroAmount();
+
+        v.balanceWei = v.balanceWei.sub(amountWei);
+        totalLiabilitiesWei = totalLiabilitiesWei.sub(amountWei);
+        a.lastRequestAt = uint64(block.timestamp);
+
+        uint64 delay = vaultWithdrawDelaySeconds;
+        if (v.mode == uint8(VaultMode.Fortress)) {
+            delay = uint64(uint256(delay) + (uint256(delay) / 2));
