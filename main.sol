@@ -583,3 +583,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
     function _debitChecking(address user, uint256 amountWei) internal {
         Account storage a = _acct[user];
         if (a.checking < amountWei) revert Nebula__BalanceTooLow();
+        a.checking = a.checking.sub(amountWei);
+        totalLiabilitiesWei = totalLiabilitiesWei.sub(amountWei);
+    }
+
+    // ---------- User: vault lifecycle ----------
+    function createVault(bytes32 labelHash, uint256 goalWei, uint64 unlockAt, uint8 mode) external whenNotPaused nonReentrant returns (uint256 vaultId) {
+        if (mode > uint8(VaultMode.Fortress)) revert Nebula__BadParam();
+        if (unlockAt != 0 && unlockAt < block.timestamp) revert Nebula__BadParam();
+
+        vaultId = vaultCount[msg.sender] + 1;
+        vaultCount[msg.sender] = vaultId;
+
+        Vault storage v = _vaults[msg.sender][vaultId];
+        v.labelHash = labelHash;
+        v.balanceWei = 0;
+        v.goalWei = goalWei;
+        v.unlockAt = unlockAt;
+        v.createdAt = uint64(block.timestamp);
+        v.mode = mode;
+        v.spice = uint32(uint256(keccak256(abi.encodePacked(labelHash, msg.sender, vaultId, SENTINEL_0))) >> 224);
+
+        emit NebulaVaultCreated(msg.sender, vaultId, labelHash, goalWei, unlockAt, mode);
+        _audit(keccak256(abi.encodePacked("vaultNew", msg.sender, vaultId, labelHash, goalWei, unlockAt, mode)));
+    }
+
+    function setVaultGoal(uint256 vaultId, uint256 newGoalWei) external whenNotPaused nonReentrant {
+        Vault storage v = _getVaultOrRevert(msg.sender, vaultId);
+        v.goalWei = newGoalWei;
+        emit NebulaVaultGoalUpdated(msg.sender, vaultId, newGoalWei);
+        _ai(msg.sender, int256(_score(msg.sender, newGoalWei, true)));
+    }
+
+    function setVaultUnlock(uint256 vaultId, uint64 newUnlockAt) external whenNotPaused nonReentrant {
+        Vault storage v = _getVaultOrRevert(msg.sender, vaultId);
+        uint64 cur = v.unlockAt;
+        if (cur == 0) {
+            if (newUnlockAt != 0 && newUnlockAt < block.timestamp) revert Nebula__BadParam();
+        } else {
+            if (newUnlockAt < cur) revert Nebula__BadParam();
+        }
+        v.unlockAt = newUnlockAt;
+        emit NebulaVaultUnlockUpdated(msg.sender, vaultId, newUnlockAt);
+    }
+
+    function moveToVault(uint256 vaultId, uint256 amountWei) external whenNotPaused nonReentrant {
+        if (amountWei == 0) revert Nebula__ZeroAmount();
+        Vault storage v = _getVaultOrRevert(msg.sender, vaultId);
+        _debitChecking(msg.sender, amountWei);
+        v.balanceWei = v.balanceWei.add(amountWei);
+        totalLiabilitiesWei = totalLiabilitiesWei.add(amountWei);
+        emit NebulaVaultToppedUp(msg.sender, vaultId, amountWei, v.balanceWei);
+        _ai(msg.sender, int256(_score(msg.sender, amountWei, true)));
+        _audit(keccak256(abi.encodePacked("toVault", msg.sender, vaultId, amountWei)));
+    }
+
+    function moveFromVault(uint256 vaultId, uint256 amountWei) external whenNotPaused nonReentrant {
+        if (amountWei == 0) revert Nebula__ZeroAmount();
+        Vault storage v = _getVaultOrRevert(msg.sender, vaultId);
+        _checkVaultUnlocked(v);
+        if (v.balanceWei < amountWei) revert Nebula__BalanceTooLow();
+        v.balanceWei = v.balanceWei.sub(amountWei);
+        totalLiabilitiesWei = totalLiabilitiesWei.sub(amountWei);
+        _creditChecking(msg.sender, amountWei);
+        emit NebulaVaultMovedOut(msg.sender, vaultId, amountWei, v.balanceWei);
+        _ai(msg.sender, -int256(_score(msg.sender, amountWei, true)));
