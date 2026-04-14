@@ -518,3 +518,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
         emit NebulaDeposit(msg.sender, toChecking, fee, memoTag);
 
         if (toSavings != 0) {
+            Vault storage v = _getVaultOrRevert(msg.sender, vaultId);
+            v.balanceWei = v.balanceWei.add(toSavings);
+            totalLiabilitiesWei = totalLiabilitiesWei.add(toSavings);
+            emit NebulaVaultToppedUp(msg.sender, vaultId, toSavings, v.balanceWei);
+        }
+
+        _ai(msg.sender, int256(_score(msg.sender, net, toSavings != 0)));
+        _audit(keccak256(abi.encodePacked("depSplit", msg.sender, gross, toSavingsBps, vaultId, memoTag)));
+    }
+
+    function _depositToChecking(address user, uint256 amountWei, bytes32 memoTag) internal {
+        if (amountWei == 0) revert Nebula__ZeroAmount();
+        (uint256 fee, uint256 net) = _takeFee(amountWei, depositFeeBps);
+        _creditChecking(user, net);
+        emit NebulaDeposit(user, net, fee, memoTag);
+        _ai(user, int256(_score(user, net, false)));
+        _audit(keccak256(abi.encodePacked("deposit", user, amountWei, fee, memoTag)));
+    }
+
+    function _creditChecking(address user, uint256 amountWei) internal {
+        Account storage a = _acct[user];
+        a.checking = a.checking.add(amountWei);
+        totalLiabilitiesWei = totalLiabilitiesWei.add(amountWei);
+    }
+
+    // ---------- User: internal transfers (checking -> checking) ----------
+    function transferInternal(address to, uint256 amountWei, bytes32 memoTag) external whenNotPaused nonReentrant {
+        if (to == address(0)) revert Nebula__ZeroAddress();
+        if (amountWei == 0) revert Nebula__ZeroAmount();
+        _debitChecking(msg.sender, amountWei);
+        _creditChecking(to, amountWei);
+        emit NebulaTransferInternal(msg.sender, to, amountWei, memoTag);
+        _ai(msg.sender, -int256(_score(msg.sender, amountWei, false)));
+        _ai(to, int256(_score(to, amountWei, false)));
+        _audit(keccak256(abi.encodePacked("xfer", msg.sender, to, amountWei, memoTag)));
+    }
+
+    function transferInternalWithSig(
+        address user,
+        address to,
+        uint256 amountWei,
+        uint256 deadline,
+        bytes32 memoTag,
+        bytes calldata signature
+    ) external whenNotPaused nonReentrant {
+        if (block.timestamp > deadline) revert Nebula__SignatureExpired(deadline);
+        if (user == address(0) || to == address(0)) revert Nebula__ZeroAddress();
+        if (amountWei == 0) revert Nebula__ZeroAmount();
+
+        Account storage a = _acct[user];
+        bytes32 digest = _hashTypedData(keccak256(abi.encode(_TYPEHASH_INTERNAL_XFER, user, to, amountWei, a.nonce, deadline, memoTag)));
+        _validateSig(user, digest, signature);
+        unchecked {
+            a.nonce += 1;
+        }
+
+        _debitChecking(user, amountWei);
+        _creditChecking(to, amountWei);
+        emit NebulaTransferInternal(user, to, amountWei, memoTag);
+        _audit(keccak256(abi.encodePacked("xferSig", user, to, amountWei, deadline, memoTag)));
+    }
+
+    function _debitChecking(address user, uint256 amountWei) internal {
+        Account storage a = _acct[user];
+        if (a.checking < amountWei) revert Nebula__BalanceTooLow();
