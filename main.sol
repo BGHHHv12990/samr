@@ -1038,3 +1038,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
     }
 
     function accountHealth(address user) external view returns (uint256 healthBps, uint256 checkingWei, uint256 vaultsWei, uint256 vaults) {
+        Account storage a = _acct[user];
+        checkingWei = a.checking;
+        uint256 n = vaultCount[user];
+        vaults = n;
+
+        uint256 tv;
+        for (uint256 i = 1; i <= n; i++) {
+            tv += _vaults[user][i].balanceWei;
+        }
+        vaultsWei = tv;
+
+        uint256 denom = checkingWei + vaultsWei + 1;
+        uint256 ratio = (vaultsWei * 10_000) / denom;
+        uint256 spice = uint256(keccak256(abi.encodePacked(user, SENTINEL_0, aiEpoch, _DOMAIN_SALT))) % 97;
+        healthBps = NebulaMath.min(10_000, ratio + spice);
+    }
+
+    function policySnapshot()
+        external
+        view
+        returns (
+            address _owner,
+            address _guardian,
+            bool _paused,
+            address _feeCollector,
+            uint16 _depositFeeBps,
+            uint16 _withdrawFeeBps,
+            uint16 _vaultWithdrawFeeBps,
+            uint64 _withdrawDelaySeconds,
+            uint64 _vaultWithdrawDelaySeconds,
+            uint64 _minSpacingSeconds,
+            uint256 _perTxMaxWei,
+            uint256 _perDaySoftLimitWei,
+            bool _enforceSoft,
+            bytes32 _aiModelTag,
+            uint256 _aiEpoch,
+            uint256 liabilitiesWei,
+            uint256 chainIdPinned
+        )
+    {
+        _owner = owner;
+        _guardian = guardian;
+        _paused = paused;
+        _feeCollector = feeCollector;
+        _depositFeeBps = depositFeeBps;
+        _withdrawFeeBps = withdrawFeeBps;
+        _vaultWithdrawFeeBps = vaultWithdrawFeeBps;
+        _withdrawDelaySeconds = withdrawDelaySeconds;
+        _vaultWithdrawDelaySeconds = vaultWithdrawDelaySeconds;
+        _minSpacingSeconds = minRequestSpacingSeconds;
+        _perTxMaxWei = perTxMaxWithdrawWei;
+        _perDaySoftLimitWei = perDaySoftLimitWei;
+        _enforceSoft = enforceSoftDailyLimit;
+        _aiModelTag = aiModelTag;
+        _aiEpoch = aiEpoch;
+        liabilitiesWei = totalLiabilitiesWei;
+        chainIdPinned = _CHAIN_ID_AT_DEPLOY;
+    }
+
+    // ---------- Internals ----------
+    function _day(uint256 ts) internal pure returns (uint64) {
+        return uint64(ts / 1 days);
+    }
+
+    function _touchDay(address user, uint256 outflowWei) internal {
