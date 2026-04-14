@@ -778,3 +778,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
         ticket = computeTicket(msg.sender, to, net, true, vaultId, memoTag);
 
         Pending storage p = _pending[msg.sender][ticket];
+        if (p.amountWei != 0) revert Nebula__AlreadyExists();
+        p.amountWei = net;
+        p.feeWei = fee;
+        p.availableAt = avail;
+        p.to = to;
+        p.fromVault = true;
+        p.vaultId = vaultId;
+
+        if (fee != 0) _pushEth(feeCollector, fee);
+        emit NebulaVaultWithdrawRequested(msg.sender, vaultId, to, net, fee, avail, ticket);
+
+        // GoalGate only signals; does not block.
+        if (v.mode == uint8(VaultMode.GoalGate) && v.goalWei != 0) {
+            if (amountWei > v.goalWei) {
+                _ai(msg.sender, -int256(_score(msg.sender, amountWei, true)));
+            } else {
+                _ai(msg.sender, int256(_score(msg.sender, amountWei, true)));
+            }
+        } else {
+            _ai(msg.sender, -int256(_score(msg.sender, net, true)));
+        }
+
+        _audit(keccak256(abi.encodePacked("reqVW", msg.sender, vaultId, to, amountWei, fee, avail, memoTag)));
+    }
+
+    function executeVaultWithdraw(bytes32 ticket) external whenNotPaused nonReentrant {
+        Pending storage p = _pending[msg.sender][ticket];
+        if (p.amountWei == 0) revert Nebula__BadState();
+        if (!p.fromVault) revert Nebula__BadState();
+        if (block.timestamp < p.availableAt) revert Nebula__NotReady(p.availableAt);
+
+        uint256 amount = p.amountWei;
+        address to = p.to;
+        uint256 vaultId = p.vaultId;
+        delete _pending[msg.sender][ticket];
+
+        _pushEth(to, amount);
+        emit NebulaVaultWithdrawExecuted(msg.sender, vaultId, to, amount, ticket);
+        _audit(keccak256(abi.encodePacked("exeVW", msg.sender, vaultId, to, amount, ticket)));
+    }
+
+    // ---------- Signed staged requests ----------
+    function requestWithdrawWithSig(
+        address user,
+        address to,
+        uint256 amountWei,
+        uint256 deadline,
+        bytes32 memoTag,
+        bytes calldata signature
+    ) external whenNotPaused nonReentrant returns (bytes32 ticket) {
+        if (block.timestamp > deadline) revert Nebula__SignatureExpired(deadline);
+        if (user == address(0) || to == address(0)) revert Nebula__ZeroAddress();
+        if (amountWei == 0) revert Nebula__ZeroAmount();
+        if (amountWei > perTxMaxWithdrawWei) revert Nebula__TooLarge();
+
+        Account storage a = _acct[user];
+        bytes32 digest = _hashTypedData(keccak256(abi.encode(_TYPEHASH_WITHDRAW, user, to, amountWei, a.nonce, deadline, memoTag)));
+        _validateSig(user, digest, signature);
+        unchecked {
+            a.nonce += 1;
+        }
+
+        _cooldown(a);
+        _touchDay(user, amountWei);
+
