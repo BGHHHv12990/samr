@@ -453,3 +453,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
     function setFeeRates(uint16 newDepositBps, uint16 newWithdrawBps, uint16 newVaultWithdrawBps) external onlyOwner {
         if (newDepositBps > 175) revert Nebula__FeeTooHigh();      // <= 1.75%
         if (newWithdrawBps > 175) revert Nebula__FeeTooHigh();
+        if (newVaultWithdrawBps > 225) revert Nebula__FeeTooHigh(); // <= 2.25%
+
+        depositFeeBps = newDepositBps;
+        withdrawFeeBps = newWithdrawBps;
+        vaultWithdrawFeeBps = newVaultWithdrawBps;
+        emit NebulaFeeRatesUpdated(newDepositBps, newWithdrawBps, newVaultWithdrawBps);
+        emit NebulaPolicy(keccak256(abi.encodePacked("fees", newDepositBps, newWithdrawBps, newVaultWithdrawBps)), block.timestamp);
+    }
+
+    function setTimingPolicy(uint64 newWithdrawDelaySeconds, uint64 newVaultWithdrawDelaySeconds, uint64 newMinSpacingSeconds)
+        external
+        onlyOwner
+    {
+        if (newWithdrawDelaySeconds < 8 minutes || newWithdrawDelaySeconds > 14 days) revert Nebula__BadParam();
+        if (newVaultWithdrawDelaySeconds < 15 minutes || newVaultWithdrawDelaySeconds > 45 days) revert Nebula__BadParam();
+        if (newMinSpacingSeconds < 45 seconds || newMinSpacingSeconds > 2 days) revert Nebula__BadParam();
+
+        withdrawDelaySeconds = newWithdrawDelaySeconds;
+        vaultWithdrawDelaySeconds = newVaultWithdrawDelaySeconds;
+        minRequestSpacingSeconds = newMinSpacingSeconds;
+        emit NebulaTimingUpdated(newWithdrawDelaySeconds, newVaultWithdrawDelaySeconds, newMinSpacingSeconds);
+    }
+
+    function setRiskPolicy(uint256 newPerTxMaxWei, uint256 newPerDaySoftLimitWei, bool newEnforceSoftLimit) external onlyOwner {
+        if (newPerTxMaxWei < 0.15 ether) revert Nebula__BadParam();
+        if (newPerTxMaxWei > 75_000 ether) revert Nebula__BadParam();
+        if (newPerDaySoftLimitWei < 1 ether) revert Nebula__BadParam();
+        if (newPerDaySoftLimitWei > 2_000_000 ether) revert Nebula__BadParam();
+        perTxMaxWithdrawWei = newPerTxMaxWei;
+        perDaySoftLimitWei = newPerDaySoftLimitWei;
+        enforceSoftDailyLimit = newEnforceSoftLimit;
+        emit NebulaRiskUpdated(newPerTxMaxWei, newPerDaySoftLimitWei, newEnforceSoftLimit);
+    }
+
+    function setAiModelTag(bytes32 newTag) external onlyOwner {
+        aiModelTag = newTag;
+        emit NebulaPolicy(keccak256(abi.encodePacked("aiModelTag")), uint256(newTag));
+    }
+
+    function bumpAiEpoch() external onlyGuardianOrOwner {
+        unchecked {
+            aiEpoch += 1;
+        }
+        emit NebulaPolicy(keccak256(abi.encodePacked("aiEpoch")), aiEpoch);
+    }
+
+    // ---------- User: deposits ----------
+    function deposit(bytes32 memoTag) external payable whenNotPaused nonReentrant {
+        _depositToChecking(msg.sender, msg.value, memoTag);
+    }
+
+    function depositAndSplit(bytes32 memoTag, uint16 toSavingsBps, uint256 vaultId) external payable whenNotPaused nonReentrant {
+        if (toSavingsBps > 10_000) revert Nebula__BadParam();
+        if (msg.value == 0) revert Nebula__ZeroAmount();
+
+        uint256 gross = msg.value;
+        (uint256 fee, uint256 net) = _takeFee(gross, depositFeeBps);
+
+        uint256 toSavings = (net * uint256(toSavingsBps)) / 10_000;
+        uint256 toChecking = net.sub(toSavings);
+
+        _creditChecking(msg.sender, toChecking);
+        emit NebulaDeposit(msg.sender, toChecking, fee, memoTag);
+
+        if (toSavings != 0) {
