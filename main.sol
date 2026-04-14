@@ -908,3 +908,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
         uint64 delay = vaultWithdrawDelaySeconds;
         if (v.mode == uint8(VaultMode.Fortress)) {
             delay = uint64(uint256(delay) + (uint256(delay) / 2));
+        }
+        uint64 avail = uint64(block.timestamp) + delay;
+        ticket = computeTicket(user, to, net, true, vaultId, memoTag);
+
+        Pending storage p = _pending[user][ticket];
+        if (p.amountWei != 0) revert Nebula__AlreadyExists();
+        p.amountWei = net;
+        p.feeWei = fee;
+        p.availableAt = avail;
+        p.to = to;
+        p.fromVault = true;
+        p.vaultId = vaultId;
+
+        if (fee != 0) _pushEth(feeCollector, fee);
+        emit NebulaVaultWithdrawRequested(user, vaultId, to, net, fee, avail, ticket);
+        _audit(keccak256(abi.encodePacked("reqVWsig", user, vaultId, to, amountWei, fee, avail, memoTag)));
+    }
+
+    // ---------- Scheduled savings ----------
+    function createSchedule(uint256 vaultId, uint256 amountWei, uint64 everySeconds, uint64 startAt, uint64 endAt)
+        external
+        whenNotPaused
+        nonReentrant
+        returns (bytes32 scheduleId)
+    {
+        if (amountWei == 0) revert Nebula__ZeroAmount();
+        if (everySeconds < 5 minutes || everySeconds > 90 days) revert Nebula__BadParam();
+        if (startAt < block.timestamp) revert Nebula__BadParam();
+        if (endAt != 0 && endAt <= startAt) revert Nebula__BadParam();
+        _getVaultOrRevert(msg.sender, vaultId);
+
+        scheduleId = computeScheduleId(msg.sender, vaultId, amountWei, everySeconds, startAt, endAt);
+        Schedule storage s = _schedules[msg.sender][scheduleId];
+        if (s.live) revert Nebula__AlreadyExists();
+
+        s.amountWei = amountWei;
+        s.everySeconds = everySeconds;
+        s.nextAt = startAt;
+        s.endAt = endAt;
+        s.flags = uint32(uint256(keccak256(abi.encodePacked(scheduleId, SENTINEL_2))) >> 224);
+        s.vaultId = vaultId;
+        s.live = true;
+
+        emit NebulaScheduledCreated(msg.sender, scheduleId, amountWei, everySeconds, startAt, endAt);
+        _audit(keccak256(abi.encodePacked("schNew", msg.sender, scheduleId, vaultId, amountWei, everySeconds, startAt, endAt)));
+    }
+
+    function cancelSchedule(bytes32 scheduleId) external whenNotPaused nonReentrant {
+        Schedule storage s = _schedules[msg.sender][scheduleId];
+        if (!s.live) revert Nebula__BadState();
+        delete _schedules[msg.sender][scheduleId];
+        emit NebulaScheduledCancelled(msg.sender, scheduleId);
+        _audit(keccak256(abi.encodePacked("schCan", msg.sender, scheduleId)));
+    }
+
+    function pokeSchedule(bytes32 scheduleId, uint256 maxMoves) external whenNotPaused nonReentrant returns (uint256 movedWei, uint64 nextAt) {
+        if (maxMoves == 0) revert Nebula__BadParam();
+        if (maxMoves > 9) maxMoves = 9; // cap gas
+
+        Schedule storage s = _schedules[msg.sender][scheduleId];
+        if (!s.live) revert Nebula__BadState();
+
+        uint64 t = uint64(block.timestamp);
+        uint256 moves;
+
