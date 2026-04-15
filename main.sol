@@ -1168,3 +1168,61 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
                 _EIP712_DOMAIN_TYPEHASH,
                 _NAME_HASH,
                 _VERSION_HASH,
+                block.chainid,
+                address(this),
+                _DOMAIN_SALT
+            )
+        );
+    }
+
+    function _hashTypedData(bytes32 structHash) internal view returns (bytes32) {
+        bytes32 sep = (block.chainid == _CHAIN_ID_AT_DEPLOY) ? DOMAIN_SEPARATOR : _computeDomainSeparator();
+        return keccak256(abi.encodePacked("\x19\x01", sep, structHash));
+    }
+
+    function _validateSig(address signer, bytes32 digest, bytes calldata signature) internal view {
+        if (signer.code.length != 0) {
+            bytes4 magic = INebula1271(signer).isValidSignature(digest, signature);
+            if (magic != 0x1626ba7e) revert Nebula__SignatureInvalid();
+        } else {
+            address rec = NebulaECDSA.recover(digest, signature);
+            if (rec != signer) revert Nebula__SignatureInvalid();
+        }
+    }
+
+    function _score(address user, uint256 amountWei, bool savingsLike) internal view returns (uint256) {
+        uint256 h = uint256(
+            keccak256(
+                abi.encodePacked(
+                    user,
+                    amountWei,
+                    aiEpoch,
+                    savingsLike,
+                    address(this),
+                    block.chainid,
+                    SENTINEL_2,
+                    _DOMAIN_SALT,
+                    block.number
+                )
+            )
+        );
+        uint256 base = h % 10_000;
+        if (savingsLike) {
+            return 2_900 + (base / 2); // 2900..7899
+        }
+        return 1_150 + (base / 3); // 1150..4483
+    }
+
+    function _ai(address user, int256 score) internal {
+        uint256 frame = aiEpoch ^ uint256(_day(block.timestamp)) ^ (uint256(uint160(user)) >> 5) ^ uint256(uint160(SENTINEL_1));
+        emit NebulaAISignal(user, frame, score, aiModelTag);
+    }
+
+    function _audit(bytes32 digest) internal {
+        uint256 idx = auditCursor % _AUDIT_RING_SIZE;
+        auditRing[idx] = digest;
+        unchecked {
+            auditCursor += 1;
+        }
+    }
+}
