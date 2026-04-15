@@ -1103,3 +1103,68 @@ contract Samr_NebulaAIBankSavings is NebulaReentrancyGuard, NebulaPausable {
     }
 
     function _touchDay(address user, uint256 outflowWei) internal {
+        Account storage a = _acct[user];
+        uint64 d = _day(block.timestamp);
+        if (a.dayIndex != d) {
+            a.dayIndex = d;
+            a.dayOutflowWei = 0;
+        }
+        uint256 next = a.dayOutflowWei.add(outflowWei);
+        a.dayOutflowWei = next;
+
+        if (next > perDaySoftLimitWei) {
+            uint256 penalty = _softPenalty(next, perDaySoftLimitWei);
+            _ai(user, -int256(penalty));
+            if (enforceSoftDailyLimit) revert Nebula__TooLarge();
+        }
+    }
+
+    function _softPenalty(uint256 observed, uint256 limit) internal pure returns (uint256) {
+        if (limit == 0) return 0;
+        uint256 ratioBps = (observed * 10_000) / limit;
+        if (ratioBps <= 10_000) return 0;
+        uint256 extra = ratioBps - 10_000;
+        return NebulaMath.min(extra, 60_000);
+    }
+
+    function _cooldown(Account storage a) internal view {
+        uint256 next = uint256(a.lastRequestAt) + uint256(minRequestSpacingSeconds);
+        if (block.timestamp < next) revert Nebula__Cooldown(uint64(next));
+    }
+
+    function _checkVaultUnlocked(Vault storage v) internal view {
+        if (v.unlockAt != 0 && block.timestamp < v.unlockAt) revert Nebula__VaultLocked(v.unlockAt);
+        if (v.mode == uint8(VaultMode.TimelockOnly) && v.unlockAt == 0) {
+            // Mode implies a lock intent; still allow, but score will reflect.
+            // No revert to avoid user lockout mistakes.
+        }
+    }
+
+    function _getVaultOrRevert(address user, uint256 vaultId) internal view returns (Vault storage v) {
+        if (vaultId == 0 || vaultId > vaultCount[user]) revert Nebula__VaultNotFound();
+        v = _vaults[user][vaultId];
+    }
+
+    function _fee(uint256 amountWei, uint16 bps) internal pure returns (uint256) {
+        if (bps == 0) return 0;
+        // round up: prevents dust bypass
+        return (amountWei * uint256(bps) + 9_999) / 10_000;
+    }
+
+    function _takeFee(uint256 amountWei, uint16 bps) internal returns (uint256 feeWei, uint256 netWei) {
+        feeWei = _fee(amountWei, bps);
+        netWei = amountWei.sub(feeWei);
+        if (feeWei != 0) _pushEth(feeCollector, feeWei);
+    }
+
+    function _pushEth(address to, uint256 amountWei) internal {
+        (bool ok, ) = to.call{value: amountWei}("");
+        if (!ok) revert Nebula__BadState();
+    }
+
+    function _computeDomainSeparator() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                _EIP712_DOMAIN_TYPEHASH,
+                _NAME_HASH,
+                _VERSION_HASH,
